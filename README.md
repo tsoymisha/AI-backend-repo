@@ -1,133 +1,192 @@
-# Linkage Lab backend (AWS Amplify Gen 2)
+# Project Backend
 
-Backend for the accessible kiosk-ordering app. A phone finds a kiosk over
-BLE, connects to it, and places the order from an accessible phone screen;
-the kiosk shows the cart and the order in real time.
+FastAPI backend for accessible kiosk ordering. A phone finds a kiosk over
+Bluetooth, connects to it, and orders from an accessible phone screen; the
+kiosk shows the cart and the order live. Requires Python 3.10 or newer.
 
-```
-Phone (Flutter)  --BLE scan-->  Kiosk tablet (Flutter, advertises token)
-      |                                  |
-      |  GraphQL (AppSync)               |  GraphQL + real-time subscription
-      v                                  v
-         AppSync API  -->  linkage-api Lambda  -->  DynamoDB tables
-         Cognito: phones = guests, kiosks = "kiosks" group
-```
+## Run locally (Windows PowerShell)
 
-## What is in here
+From the repository folder:
 
-| Path | What it does |
-| --- | --- |
-| `amplify/auth/resource.ts` | Cognito: guest access for phones, `kiosks` and `admins` groups |
-| `amplify/data/resource.ts` | Tables, who can read them, every API operation, real-time subscriptions |
-| `amplify/functions/api/handler.ts` | The one Lambda: identifies the caller, routes to the logic |
-| `amplify/functions/api/src/service.ts` | Business logic: pairing, cart, orders, help, status |
-| `amplify/functions/api/src/pure.ts` | Pricing, validation, tokens (no AWS code) |
-| `amplify/functions/api/src/dynamoDb.ts` | DynamoDB access with safe (optimistic) transactions |
-| `seed/gist-cafe.json` | Demo store, menu and kiosk (placeholder values: fix after visiting) |
-| `scripts/` | Load store data, create kiosk logins |
-| `test/` | 33 tests, run against an in-memory DB and a local DynamoDB |
-
-## Setup (once per developer)
-
-1. **AWS account.** New accounts get a free plan with credits for 6 months.
-   In the AWS console, create a **budget alert** (Billing → Budgets, e.g. $5).
-2. **Credentials.** Install the AWS CLI and run `aws configure sso` (or
-   `aws configure` with an IAM user that has `AmplifyBackendDeployFullAccess`).
-   Use region **ap-northeast-2 (Seoul)**.
-3. **Install.** Node.js 22, then in this folder: `npm install`
-4. **Run the tests.** `npm test` (no AWS needed)
-
-## Run your own cloud sandbox
-
-```bash
-npx ampx sandbox            # deploys a personal copy; keeps running and redeploys on save
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m scripts.seed seed\gist-cafe.json
+.\.venv\Scripts\python.exe -m scripts.create_kiosk GK01
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-This writes `amplify_outputs.json`. Copy it into the Flutter apps (they need
-it to connect). In a second terminal, load data and create the kiosk login:
+- `scripts.seed` loads the demo cafe (menu, accessibility info, kiosk GK01).
+- `scripts.create_kiosk` prints the kiosk's secret key **once**; save it for the kiosk app.
+- Data is stored in `linkage.db` (SQLite) in the project folder. Delete it to start over.
 
-```bash
-npm run seed -- seed/gist-cafe.json
-KIOSK_PASSWORD='choose-a-long-password' npm run create-kiosk -- GK01
+Using the virtual environment Python directly does not require activating it.
+In VS Code, select `.venv\Scripts\python.exe` as your Python interpreter.
+
+- App: http://127.0.0.1:8000/
+- Health check: http://127.0.0.1:8000/health
+- Interactive API documentation: http://127.0.0.1:8000/docs (try every endpoint here)
+
+Run the tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-Stop with Ctrl+C; `npx ampx sandbox delete` removes the sandbox resources.
+## How it works
 
-## Contract for the Flutter apps
-
-### BLE advertisement (kiosk → phone)
-
-The kiosk advertises **manufacturer-specific data** with company ID
-`0xFFFF` (reserved for testing) and this 14-byte ASCII payload:
-
-```
-"LK" + kioskId (4 chars) + token (8 chars)      e.g.  LKGK017H3KQ9ZC
+```text
+Phone app  --Bluetooth-->  Kiosk app (broadcasts kiosk ID + pairing token)
+    |                          |
+    |  HTTP + WebSocket        |  HTTP + WebSocket
+    v                          v
+            FastAPI backend  -->  database
 ```
 
-- Get `token` from `kioskHeartbeat`; call it again after `refreshInMs`
-  (about every 30 s) and update the advertisement.
-- The phone filters scans for company ID `0xFFFF` and the `LK` prefix, then
-  calls `connectToKiosk(kioskId, token)`. A token is valid for 60 s, so
-  only a phone physically near the kiosk can connect.
+1. The kiosk calls `POST /kiosk/heartbeat` every ~30 s and broadcasts the
+   returned token over Bluetooth. Tokens expire after 60 s.
+2. The phone hears it and calls `POST /sessions` with the kiosk ID and token.
+   Only a phone standing at the kiosk can know a current token. One phone per
+   kiosk at a time; a phone idle for 10 minutes is disconnected.
+3. The phone sends its cart (`PUT /sessions/{id}/cart`); the server prices it
+   from the real menu and the kiosk screen updates live.
+4. The phone places the order; it gets a number (#1, #2… restarting daily,
+   Korea time) and appears on the kiosk.
+5. Staff move it through `accepted → preparing → ready → picked_up`; the phone
+   is told at each step.
 
-### Operations
+## Structure
 
-Phones call with the default auth mode (guest/IAM). Kiosks sign in and pass
-`authMode: userPool`.
+```text
+app/
+  main.py          # Application, routers, root and health routes
+  config.py        # Settings (DATABASE_URL, timeouts, limits)
+  db.py            # Database connection
+  models.py        # Tables: stores, kiosks, devices, sessions, orders
+  logic.py         # Pure rules: pricing, tokens, order status (no database)
+  service.py       # Ordering logic using the database
+  auth.py          # Phone device tokens and kiosk keys
+  realtime.py      # Live updates to connected WebSockets
+  schemas.py       # Request bodies
+  errors.py        # Error codes and JSON error format
+  routers/
+    public.py      # GET /stores, /stores/{id}, /kiosks/{id}
+    phone.py       # Phone app endpoints
+    kiosk.py       # Kiosk app endpoints
+    ws.py          # WebSocket live updates
+scripts/
+  seed.py          # Load a store from a JSON file
+  create_kiosk.py  # Issue a kiosk key
+seed/gist-cafe.json  # Demo cafe (placeholder prices and accessibility info)
+tests/             # pytest: rules and full API flow
+requirements.txt   # Runtime dependencies
+requirements-dev.txt  # + test tools
+```
 
-| Operation | Caller | Arguments | Returns |
-| --- | --- | --- | --- |
-| `kioskHeartbeat` | kiosk | — | `HeartbeatResult` {token, expiresAtMs, refreshInMs} |
-| `connectToKiosk` | phone | kioskId, token | `LinkEvent` type `connected` (sessionId, kioskName, storeName) |
-| `syncCart` | phone | sessionId, items | `LinkEvent` type `cart` (total, summary) |
-| `submitOrder` | phone | sessionId, items, paymentMethod?, note? | `LinkEvent` type `ordered` (orderId, orderNumber, total, summary) |
-| `requestHelp` | phone | sessionId | `LinkEvent` type `help` |
-| `cancelMyOrder` | phone | orderId | `LinkEvent` type `order_status` |
-| `getMyOrder` | phone | orderId | `MyOrder` |
-| `resolveHelp` | kiosk | sessionId | `LinkEvent` type `help_resolved` |
-| `updateOrderStatus` | kiosk | orderId, status | `LinkEvent` type `order_status` |
-| `endSession` | either | sessionId | `LinkEvent` type `ended` |
+## API for the apps
 
-`items` is a JSON array; prices are never sent, the server computes them:
+JSON uses camelCase. Full, clickable list at `/docs`.
+
+### Who is calling
+
+- **Phone:** on first launch call `POST /devices` → `{"deviceId", "token"}`. Store
+  the token (Keychain) and send `Authorization: Bearer dev_...` on every call.
+  No sign-up.
+- **Kiosk:** send `Authorization: Bearer ksk_...` (from `scripts.create_kiosk`).
+
+### Bluetooth advertisement (kiosk → phone)
+
+The kiosk broadcasts `"LK" + kioskId (4 chars) + token (8 chars)`, e.g.
+`LKGK017H3KQ9ZC`. The phone strips `LK`, splits the rest into kiosk ID and
+token, and calls `POST /sessions`. (The exact BLE field depends on whether the
+kiosk is an iPad or an Android tablet; to be decided with the app team.)
+
+### Phone endpoints
+
+| Method and path | Body | What it does |
+| --- | --- | --- |
+| `POST /devices` | — | Get an anonymous device token |
+| `GET /stores`, `GET /stores/{id}` | — | Store info, accessibility, menu |
+| `POST /sessions` | `kioskId`, `token` | Connect to a kiosk → `sessionId` |
+| `GET /sessions/{id}` | — | Connection status and cart |
+| `PUT /sessions/{id}/cart` | `items` | Update the cart shown on the kiosk |
+| `POST /sessions/{id}/order` | `items`, `paymentMethod`?, `note`? | Place the order → `orderId`, `orderNumber` |
+| `POST /sessions/{id}/help` | — | Ask staff for help |
+| `POST /sessions/{id}/end` | — | Disconnect |
+| `GET /orders/{id}` | — | Order status |
+| `POST /orders/{id}/cancel` | — | Cancel before staff accepts |
+
+`items` example (prices are never sent; the server computes them):
 
 ```json
-[{ "itemId": "americano", "qty": 1, "options": { "temp": "ice", "size": "large", "extra": ["shot"] } }]
+[{"itemId": "americano", "qty": 1, "options": {"temp": "ice", "size": "large", "extra": ["shot"]}}]
 ```
 
-Order status path: `submitted → accepted → preparing → ready → picked_up`
-(`cancelled` allowed from `submitted` or `accepted`).
+`paymentMethod` is `counter` (default) or `kiosk`: payment happens there.
 
-### Reading data
+### Kiosk endpoints
 
-- Phone: `Store` (name, accessibility info, `menu` JSON) and `Kiosk` are readable by guests.
-- Kiosk: also reads `Session` and `Order` (e.g. `listOrderByStoreIdAndCreatedAtMs` for today's queue).
+| Method and path | Body | What it does |
+| --- | --- | --- |
+| `POST /kiosk/heartbeat` | — | Get the Bluetooth token; call again after `refreshInMs` |
+| `GET /kiosk/session` | — | The connected phone and its cart, or `null` |
+| `GET /kiosk/orders?status=` | — | Today's orders, newest first |
+| `POST /kiosk/orders/{id}/status` | `status` | `accepted`, `preparing`, `ready`, `picked_up`, `cancelled` |
+| `POST /kiosk/sessions/{id}/resolve-help` | — | Staff handled the help request |
+| `POST /kiosk/sessions/{id}/end` | — | Disconnect the phone |
+| `PUT /kiosk/menu/{itemId}/availability` | `available` | Mark sold out / back in stock |
 
-### Real time
+### Live updates (WebSocket)
 
-- Kiosk subscribes to `onKioskEvent(kioskId)`: phone connected, cart changed, order placed, help requested, cancelled, ended.
-- Phone subscribes to `onSessionEvent(sessionId)`: help answered, order status changed, kiosk ended the session.
+- Kiosk: `ws://HOST/ws/kiosk?token=ksk_...`
+- Phone: `ws://HOST/ws/sessions/{sessionId}?token=dev_...`
+
+Each message is a JSON event with a `type`: `connected`, `cart`, `ordered`,
+`help`, `help_resolved`, `order_status`, `ended`. Both the kiosk and the phone
+in that session receive every event. A refused connection closes with code
+4401 (bad token) or 4403 (not your session).
 
 ### Errors
 
-Errors come back with `errorType` set to a stable reason. Map these to
-Korean messages the screen reader can read:
+Every error is `{"error": "<code>", "message": "..."}`. Map codes to Korean
+messages the screen reader can read:
 
-| errorType | Meaning |
-| --- | --- |
-| `token-invalid` | Too far from the kiosk or token expired: move closer, rescan |
-| `kiosk-busy` | Another phone is using this kiosk |
-| `session-expired` / `session-not-found` | Connection ended: reconnect |
-| `item-unavailable`, `choice-unavailable` | Sold out |
-| `missing-option` | A required option (e.g. size) was not chosen |
-| `too-late-to-cancel` | Staff already started the order |
-| `bad-qty`, `unknown-item`, `bad-options`, … | App bug: invalid request |
-| `internal` | Server problem: try again |
+| Code | HTTP | Meaning |
+| --- | --- | --- |
+| `token-invalid` | 403 | Too far from the kiosk or token expired: move closer and rescan |
+| `kiosk-busy` | 409 | Another phone is using this kiosk |
+| `session-expired`, `session-not-found` | 409, 404 | Connection ended: reconnect |
+| `item-unavailable`, `choice-unavailable` | 409 | Sold out |
+| `missing-option` | 400 | A required option (e.g. size) was not chosen |
+| `too-late-to-cancel` | 409 | Staff already started the order |
+| `not-signed-in`, `not-kiosk` | 401 | Missing or wrong token |
+| `bad-request`, `bad-qty`, `unknown-item`, … | 400, 404 | App bug: invalid request |
 
-## Notes and limits
+## Deploying (later)
 
-- Sessions end after 10 minutes of inactivity; one phone per kiosk at a time.
-- Order numbers restart at 1 each day (Korea time) per store.
-- Any kiosk account can read every store's sessions and orders through the
-  table read rules; the Lambda still restricts what each kiosk can change.
-  Fine for the pilot; tighten before real deployment.
-- Payment is not handled: `paymentMethod` is `counter` or `kiosk` (pay there).
+- Set `DATABASE_URL` to PostgreSQL (e.g. AWS RDS) and add a driver such as
+  `psycopg[binary]` to `requirements.txt`. The code works unchanged.
+- Run **one** server process (no `--workers`), because live updates are kept
+  in memory. Use a host that supports WebSockets (e.g. AWS EC2, Lightsail, or
+  Elastic Beanstalk).
+
+Keep secrets in a local `.env` file; it is ignored by Git.
+
+# Git merge convention
+
+want to work on a specific feature: create a feature/(name of the feature) branch (from branch develop):
+```
+git checkout -b feature/(name of the feature)
+```
+
+finished working, merge to develop:
+```
+git checkout develop
+git merge feature/(name of the feature)
+```
+
+merging into main is only after develop passess all the checks:
+```
+git checkout main
+git merge develop
+```
