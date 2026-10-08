@@ -1,0 +1,31 @@
+{
+  "name": "linkage-backend",
+  "private": true,
+  "description": "Linkage Lab backend on AWS Amplify Gen 2: phone-to-kiosk pairing and accessible ordering",
+  "type": "module",
+  "scripts": {
+    "sandbox": "ampx sandbox",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "seed": "tsx scripts/seed.ts",
+    "create-kiosk": "tsx scripts/createKiosk.ts"
+  },
+  "devDependencies": {
+    "@aws-amplify/backend": "^1.25.1",
+    "@aws-amplify/backend-cli": "^1.10.0",
+    "@aws-sdk/util-dynamodb": "^3.996.9",
+    "@types/aws-lambda": "^8.10.164",
+    "@types/node": "^22.20.5",
+    "aws-cdk-lib": "^2.272.0",
+    "constructs": "^10.8.1",
+    "dynalite": "^4.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1146.0",
+    "@aws-sdk/client-dynamodb": "^3.1146.0",
+    "@aws-sdk/lib-dynamodb": "^3.1146.0",
+    "aws-amplify": "^6.22.1"
+  }
+}
